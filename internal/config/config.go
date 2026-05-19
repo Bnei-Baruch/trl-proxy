@@ -162,7 +162,7 @@ func (c *Config) MQTTClientID() string {
 
 // TopicJanusStatus is the retained status topic of the neighbouring Janus sidecar.
 func (c *Config) TopicJanusStatus() string {
-	return fmt.Sprintf("trl/janus/%d/status", c.NodeID)
+	return fmt.Sprintf("janus/trl%d/status", c.NodeID)
 }
 
 // TopicProxyStatus is the retained status topic of this proxy (online/offline + LWT).
