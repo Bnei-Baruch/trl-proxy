@@ -225,12 +225,27 @@ Failure reasons surfaced in the `reason` field:
 | Reason | Meaning |
 |--------|---------|
 | `janus_offline` | Last `trl/janus/{N}/status` message says offline (or has not arrived yet). |
-| `mediamtx_unreachable` | The background ping to `MEDIAMTX_API` is failing. |
 | `no_rtp_yet` | Pipeline has not seen a single RTP packet since startup. |
 | `rtp_stale` | The newest RTP packet from any language is older than `RTP_HEALTH_THRESHOLD`. |
 
 Bind the endpoint to loopback (`HEALTH_HTTP_LISTEN=127.0.0.1:9090`) — only
 the local keepalived `track_script` needs to reach it.
+
+### Why MediaMTX reachability does NOT affect `/health`
+
+MediaMTX runs behind its own HA pair with a floating VIP. When that VIP is
+migrating, the API is briefly unreachable **from both legs of our proxy pair
+at the same time**. If we let that drive `/health` to 503, both proxies
+would simultaneously become "unhealthy" and keepalived would just flap
+between two equally-blind legs without solving anything.
+
+So `mediamtx_reachable` is published in the JSON for diagnostics, the
+background pinger keeps running, and the role state machine uses it to
+decide whether to bother attempting a kick on takeover — but it has no
+influence on the HTTP status code. While MediaMTX is failing over,
+`rtspclientsink` from GStreamer handles the disconnect on its own
+(automatic reconnect), so the active leg simply resumes publishing once the
+VIP is back.
 
 ## Pipeline internals
 
@@ -320,8 +335,9 @@ implement a SIGHUP-reopen.
 |---------|----------------------|
 | `/health` returns 503 with `reason: janus_offline` | The Janus sidecar is not publishing to `trl/janus/{N}/status`, or it published `offline`. Check the sidecar. |
 | `/health` returns 503 with `reason: rtp_stale` or `no_rtp_yet` | Janus is not actually sending RTP. Verify `rtp_forward` and firewall: `tcpdump -ni any udp portrange 24500-24568`. |
-| `/health` returns 503 with `reason: mediamtx_unreachable` | The proxy cannot reach `MEDIAMTX_API`. Check DNS, firewall, and that MediaMTX is up. |
-| Active leg won't publish to MediaMTX | Look at `{LOG_DIR}/trlproxy.log` for `kick zombies failed` or `open all egress`. Possibly the previous active leg did not release publishers; the kick step is supposed to fix that — if it fails, check MediaMTX API auth/connectivity. |
+| `mediamtx_reachable: false` in `/health` body, but status still 200 | This is by design — MediaMTX VIP failover should not cause our pair to flap. Check that MediaMTX itself recovers; the active leg will resume publishing via `rtspclientsink` auto-reconnect once it does. |
+| Active leg won't publish to MediaMTX after VIP recovers | Look at `{LOG_DIR}/trlproxy.log` for repeated pipeline restarts. `rtspclientsink` usually reconnects on its own; if it does not, the worker will rebuild the pipeline after `RESTART_DELAY`. |
+| Active leg can't open egress on takeover | Look at `{LOG_DIR}/trlproxy.log` for `kick zombies failed` or `open all egress`. Possibly the previous active leg did not release publishers; the kick step is supposed to fix that — if it fails, check MediaMTX API auth/connectivity. |
 | Both legs think they are active | This is a keepalived problem, not a proxy problem. Check VRRP advertisements over vRack and that each `track_script` is calling its **local** `/health`. |
 | Repeated `role command ignored by anti-flap` | Something is causing keepalived to oscillate. The anti-flap window protects MediaMTX, but the root cause is upstream — check VRRP and the health source. |
 

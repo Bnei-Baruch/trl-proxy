@@ -1,13 +1,22 @@
 // Package health aggregates pipeline health signals and exposes them over
 // HTTP /health.
 //
-// Sources:
+// Tracked sources:
 //   - JanusOnline       — from MQTT trl/janus/{N}/status (true if "online").
 //   - LastRTPUnixNano   — updated by the pipeline on every received RTP packet.
 //   - MediaMTXReachable — set by a background goroutine that pings MediaMTX.
 //
-// The proxy is healthy when all three are true AND the last RTP packet is
-// no older than RTPThreshold.
+// Integral health rule:
+//   The proxy is healthy when JanusOnline is true AND the last RTP packet is
+//   no older than RTPThreshold.
+//
+// MediaMTX reachability is intentionally NOT part of the integral health.
+// MediaMTX itself runs behind its own HA pair with a floating VIP. When that
+// VIP is migrating, the API is briefly unreachable from BOTH legs of our
+// proxy pair simultaneously — turning that into /health=503 would only make
+// keepalived flap back and forth between two equally-blind legs. The pinger
+// still runs (the field is useful for diagnostics and the role machine uses
+// it for kick decisions), but it does not influence the HTTP response code.
 package health
 
 import (
@@ -103,13 +112,12 @@ type Snapshot struct {
 	RTPThreshold      time.Duration
 }
 
-// Healthy verifies all three health signals are good.
+// Healthy verifies the signals that should drive keepalived decisions.
+// MediaMTX reachability is reported via the JSON body for diagnostics but
+// deliberately does NOT participate here — see the package doc.
 func (s Snapshot) Healthy() (bool, string) {
 	if !s.JanusOnline {
 		return false, "janus_offline"
-	}
-	if !s.MediaMTXReachable {
-		return false, "mediamtx_unreachable"
 	}
 	if s.LastRTP.IsZero() {
 		return false, "no_rtp_yet"
